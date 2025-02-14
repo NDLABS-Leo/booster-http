@@ -25,69 +25,51 @@ func (s *HttpServer) getPieceContent(ctx context.Context, rootCid string, w http
 
 	log.Printf("[INFO] Processing request: CID=%s, dag-scope=%s", rootCid, dagScope)
 
-	// If dag-scope is "block", return only the root block
-	//if dagScope == "block" {
-	//	log.Printf("[INFO] Returning only root block for CID: %s", rootCid)
-	//	http.Error(w, "Root block retrieval not implemented", http.StatusNotImplemented)
-	//	return nil
-	//}
-
 	client := &http.Client{}
-	var start int64 = 0
-	var end int64 = chunkSize - 1
 
-	for {
-		// Create HTTP request
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			log.Printf("[ERROR] Failed to create HTTP request: %v", err)
-			return fmt.Errorf("failed to create HTTP request: %w", err)
-		}
-
-		// Set Range header
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
-
-		log.Printf("[INFO] Sending request: URL=%s, Range=bytes=%d-%d", url, start, end)
-
-		// Perform HTTP request
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("[ERROR] Failed to fetch content from remote server: %v", err)
-			return fmt.Errorf("failed to fetch piece content from %s: %w", url, err)
-		}
-		defer resp.Body.Close()
-
-		// Check response status code
-		if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-			log.Printf("[ERROR] Unexpected status code: %d from %s", resp.StatusCode, url)
-			return fmt.Errorf("unexpected status code %d from %s", resp.StatusCode, url)
-		}
-
-		log.Printf("[INFO] Successfully received response: Status=%d, Content-Length=%d", resp.StatusCode, resp.ContentLength)
-
-		// Stream data to client
-		startTime := time.Now()
-		bytesWritten, err := io.Copy(w, resp.Body)
-		elapsedTime := time.Since(startTime)
-
-		if err != nil {
-			log.Printf("[ERROR] Failed to stream data to client: %v", err)
-			return fmt.Errorf("failed to stream data to client: %w", err)
-		}
-
-		log.Printf("[INFO] Successfully streamed %d bytes in %.2f seconds", bytesWritten, elapsedTime.Seconds())
-
-		// Handle Range request
-		contentRange := resp.Header.Get("Content-Range")
-		if contentRange == "" || resp.ContentLength < chunkSize {
-			log.Printf("[INFO] File transfer completed: CID=%s", rootCid)
-			break
-		}
-
-		// Update Range for the next chunk
-		start = end + 1
-		end = start + chunkSize - 1
+	// Create the HTTP request and get the response from the remote server
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		log.Printf("[ERROR] Failed to create HTTP request: %v", err)
+		return fmt.Errorf("failed to create HTTP request: %w", err)
 	}
+
+	// Perform the HTTP request to fetch the block
+	log.Printf("[INFO] Sending request: URL=%s", url)
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[ERROR] Failed to fetch content from remote server: %v", err)
+		return fmt.Errorf("failed to fetch piece content from %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	// Check response status code
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[ERROR] Unexpected status code: %d from %s", resp.StatusCode, url)
+		return fmt.Errorf("unexpected status code %d from %s", resp.StatusCode, url)
+	}
+
+	// Set Content-Length and Content-Range headers (if applicable)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
+	if resp.ContentLength > 0 {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", resp.ContentLength-1, resp.ContentLength))
+	}
+
+	log.Printf("[INFO] Successfully received response: Status=%d, Content-Length=%d", resp.StatusCode, resp.ContentLength)
+
+	// Stream data to client
+	startTime := time.Now()
+	bytesWritten, err := io.Copy(w, resp.Body)
+	elapsedTime := time.Since(startTime)
+
+	if err != nil {
+		log.Printf("[ERROR] Failed to stream data to client: %v", err)
+		return fmt.Errorf("failed to stream data to client: %w", err)
+	}
+
+	log.Printf("[INFO] Successfully streamed %d bytes in %.2f seconds", bytesWritten, elapsedTime.Seconds())
+
+	log.Printf("[INFO] File transfer completed for CID=%s", rootCid)
 
 	return nil
 }
