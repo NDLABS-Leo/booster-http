@@ -73,7 +73,6 @@ func (s *HttpServer) getPieceContentPiece(ctx context.Context, rootCid string, w
 	return nil
 }
 
-// getPieceContent handles content retrieval requests
 func (s *HttpServer) getPieceContentRoot(ctx context.Context, rootCid string, w http.ResponseWriter, dagScope string) error {
 	// Construct the target CAR file URL
 	url := fmt.Sprintf("http://202.77.20.108:51375/root/%s", rootCid)
@@ -89,7 +88,7 @@ func (s *HttpServer) getPieceContentRoot(ctx context.Context, rootCid string, w 
 		return fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
-	// Perform the HTTP request to fetch the block
+	// Perform the HTTP request to fetch the CAR file
 	log.Printf("[INFO] Sending request: URL=%s", url)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -104,15 +103,14 @@ func (s *HttpServer) getPieceContentRoot(ctx context.Context, rootCid string, w 
 		return fmt.Errorf("unexpected status code %d from %s", resp.StatusCode, url)
 	}
 
-	// Set Content-Length and Content-Range headers (if applicable)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
-	if resp.ContentLength > 0 {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes 0-%d/%d", resp.ContentLength-1, resp.ContentLength))
-	}
+	// Set headers for CAR file
+	w.Header().Set("Content-Type", "application/car")                                          // MIME type for CAR files
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.car", rootCid)) // Set filename to rootCid.car
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))                    // Set Content-Length header
 
 	log.Printf("[INFO] Successfully received response: Status=%d, Content-Length=%d", resp.StatusCode, resp.ContentLength)
 
-	// Stream data to client
+	// Stream the CAR file data to the client
 	startTime := time.Now()
 	bytesWritten, err := io.Copy(w, resp.Body)
 	elapsedTime := time.Since(startTime)
