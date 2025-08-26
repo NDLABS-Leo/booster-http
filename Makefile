@@ -1,6 +1,6 @@
 # Makefile for retrieval-http service
 
-APP_NAME = booster-http
+APP_NAME = index-http
 GO_FILES = $(wildcard *.go)
 VERSION = 1.0.0
 
