@@ -145,6 +145,8 @@ func (s *HttpServer) getPieceContentRoot(
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
+	// 关键：告知上游返回 CAR（兼容 trustless gateway）
+	req.Header.Set("Accept", "application/vnd.ipld.car; version=1")
 	req.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := client.Do(req)
