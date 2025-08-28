@@ -120,58 +120,105 @@ func (s *HttpServer) getPieceContentPiece(ctx context.Context, rootCid string, b
 	return nil
 }
 
-func (s *HttpServer) getPieceContentRoot(ctx context.Context, rootCid string, baseURL string, w http.ResponseWriter, dagScope string) error {
-	// Construct the target CAR file URL
-	url := fmt.Sprintf("%s/root/%s", strings.TrimRight(baseURL, "/"), rootCid)
-	//url := fmt.Sprintf("http://203.160.84.158:51375/root/%s", rootCid)
-
-	log.Printf("[INFO] Processing request: CID=%s, dag-scope=%s", rootCid, dagScope)
-
-	client := &http.Client{}
-
-	// Create the HTTP request and get the response from the remote server
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		log.Printf("[ERROR] Failed to create HTTP request: %v", err)
-		return fmt.Errorf("failed to create HTTP request: %w", err)
+func (s *HttpServer) getPieceContentRoot(
+	ctx context.Context,
+	rootCid string,
+	baseURL string,
+	w http.ResponseWriter,
+	dagScope string,
+) error {
+	// 目标 URL: {baseURL}/ipfs/{cid}[?dag-scope=...]
+	base := strings.TrimRight(baseURL, "/")
+	url := fmt.Sprintf("%s/ipfs/%s", base, rootCid)
+	if dagScope != "" {
+		// 仅拼接你提到的参数；如有更多 query，可用 url.Values 组合
+		url = url + "?dag-scope=" + dagScope
 	}
 
-	// Perform the HTTP request to fetch the CAR file
-	log.Printf("[INFO] Sending request: URL=%s", url)
+	log.Printf("[INFO] Proxying: %s", url)
+
+	// 长连接、禁用整体超时；依赖 ctx 控制生命周期
+	client := &http.Client{Timeout: 0}
+
+	// 禁止自动解压，避免 Content-Length 与内容不一致
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("[ERROR] Failed to fetch content from remote server: %v", err)
-		return fmt.Errorf("failed to fetch piece content from %s: %w", url, err)
+		return fmt.Errorf("fetch upstream: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Check response status code
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("[ERROR] Unexpected status code: %d from %s", resp.StatusCode, url)
-		return fmt.Errorf("unexpected status code %d from %s", resp.StatusCode, url)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		// 将上游错误往下游透传更合理
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)
 	}
 
-	// Set headers for CAR file
-	w.Header().Set("Content-Type", "application/car")                                          // MIME type for CAR files
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.car", rootCid)) // Set filename to rootCid.car
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))                    // Set Content-Length header
-
-	log.Printf("[INFO] Successfully received response: Status=%d, Content-Length=%d", resp.StatusCode, resp.ContentLength)
-
-	// Stream the CAR file data to the client
-	startTime := time.Now()
-	bytesWritten, err := io.Copy(w, resp.Body)
-	elapsedTime := time.Since(startTime)
-
-	if err != nil {
-		log.Printf("[ERROR] Failed to stream data to client: %v", err)
-		return fmt.Errorf("failed to stream data to client: %w", err)
+	// —— 透传关键响应头 —— //
+	// Content-Type
+	if v := resp.Header.Get("Content-Type"); v != "" {
+		w.Header().Set("Content-Type", v)
+	} else {
+		// 不知道时给个通用值
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	// Content-Encoding（很关键：gzip/identity 与内容匹配）
+	if v := resp.Header.Get("Content-Encoding"); v != "" {
+		w.Header().Set("Content-Encoding", v)
+	}
+	// Content-Length：只有当上游声明了长度且我们没有改变实体（未解压）时才安全透传
+	if resp.ContentLength >= 0 {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
+	}
+	// Content-Range（如果是范围响应）
+	if v := resp.Header.Get("Content-Range"); v != "" {
+		w.Header().Set("Content-Range", v)
 	}
 
-	log.Printf("[INFO] Successfully streamed %d bytes in %.2f seconds", bytesWritten, elapsedTime.Seconds())
+	// 如果你一定想让浏览器弹下载框，可以加上这行；
+	// 但注意：若加 Content-Disposition 而不加 Content-Length 也没问题（走 chunked）
+	// w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.car", rootCid))
 
-	log.Printf("[INFO] File transfer completed for CID=%s", rootCid)
+	// 将上游状态码写回（200 或 206）
+	w.WriteHeader(resp.StatusCode)
 
+	// —— 流式复制 —— //
+	buf := make([]byte, 1<<20) // 1MB buffer
+	flusher, _ := w.(http.Flusher)
+	var total int64
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("[INFO] client canceled, written=%d bytes", total)
+			return ctx.Err()
+		default:
+		}
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			wn, werr := w.Write(buf[:n])
+			total += int64(wn)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			if werr != nil {
+				return fmt.Errorf("write downstream: %w", werr)
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return fmt.Errorf("read upstream: %w", rerr)
+		}
+	}
+
+	log.Printf("[INFO] proxy finished, bytes=%d", total)
 	return nil
 }
 
